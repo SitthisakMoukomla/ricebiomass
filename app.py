@@ -3,7 +3,8 @@ import ee
 import geemap.foliumap as geemap
 
 # Initialize Earth Engine
-ee.Initialize()
+ee.Authenticate
+ee.Initialize(project='ee-pythoncolab')
 
 # Header and layout
 st.set_page_config(layout="wide")
