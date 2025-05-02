@@ -1,43 +1,62 @@
-
 import streamlit as st
-from PIL import Image
+import ee
+import geemap.foliumap as geemap
 
-# Logo
-logo = Image.open("logo_kla_krang.jpg")
+# Initialize Earth Engine
+ee.Initialize()
 
-# Page config
-st.set_page_config(page_title="ระบบฟางข้าว - กล้าแกร่ง", layout="wide")
+# Header and layout
+st.set_page_config(layout="wide")
+st.title("ระบบติดตาม GCVI พื้นที่เกี่ยวข้าว")
+st.subheader("กล้า-แกร่ง • จังหวัดนครสวรรค์")
 
-# Header
-col1, col2 = st.columns([1, 4])
-with col1:
-    st.image(logo, width=120)
-with col2:
-    st.title("ระบบประเมินปริมาณฟางข้าวเพื่อบริหารจัดการชีวมวล")
-    st.subheader("บริษัท กล้า-แกร่ง จำกัด")
+# Function to get GCVI image
+@st.cache_data
+def get_gcvi():
+    province = ee.FeatureCollection("FAO/GAUL/2015/level1").filter(ee.Filter.eq('ADM1_NAME', 'Nakhon Sawan'))
+    aoi = province.geometry()
+    def add_gcvi(img):
+        gcvi = img.expression('NIR / GREEN - 1', {
+            'NIR': img.select('B8'),
+            'GREEN': img.select('B3')
+        }).rename('GCVI')
+        return img.addBands(gcvi)
 
-# Input section
-st.sidebar.header("พารามิเตอร์")
-area = st.sidebar.selectbox("จังหวัด", ["นครสวรรค์"])
-date_range = st.sidebar.date_input("ช่วงวันที่เก็บเกี่ยว", [])
+    s2 = ee.ImageCollection('COPERNICUS/S2_HARMONIZED')\
+        .filterBounds(aoi)\
+        .filterDate('2024-11-01', '2024-12-15')\
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))\
+        .map(add_gcvi)
 
-# Static output (replace with real analysis later)
-st.markdown("### 🔍 ผลการประเมินเบื้องต้น")
-st.metric("พื้นที่ข้าว (ไร่)", "21,500")
-st.metric("ปริมาณฟางข้าว (ตัน)", "3,870")
-st.metric("จำนวนรถเกี่ยวที่ต้องใช้", "12 คัน")
+    return s2.select('GCVI').median().clip(aoi), aoi
 
-# Placeholder for map
-st.markdown("---")
-st.markdown("#### 🗺️ แผนที่ GCVI (จำลอง)")
-st.image("https://i.imgur.com/gcvi_map_example.jpg", use_column_width=True)
+# Get GCVI and AOI
+gcvi_image, aoi = get_gcvi()
+harvested = gcvi_image.lt(1.0).selfMask()
+pixel_area = ee.Image.pixelArea().updateMask(harvested)
 
-# Export CSV (simulate)
-import pandas as pd
-df = pd.DataFrame({
-    "ตำบล": ["ท่าตะโก", "บรรพตพิสัย", "ชุมแสง"],
-    "พื้นที่ข้าว (ไร่)": [8500, 7000, 6000],
-    "ปริมาณฟาง (ตัน)": [1530, 1260, 1080]
-})
-csv = df.to_csv(index=False).encode('utf-8')
-st.download_button("📥 ดาวน์โหลด .CSV", data=csv, file_name="biomass_estimate.csv", mime="text/csv")
+# === Apply bestEffort fix ===
+area_stats = pixel_area.reduceRegion(
+    reducer=ee.Reducer.sum(),
+    geometry=aoi,
+    scale=10,
+    maxPixels=1e10,
+    bestEffort=True
+)
+
+# === Calculate outputs ===
+area_rai = area_stats.getNumber('area').divide(1600)
+tons = area_rai.multiply(0.18)
+trips = tons.divide(4)
+
+# Display metrics
+st.metric("พื้นที่เกี่ยวแล้ว (ไร่)", f"{area_rai.getInfo():,.0f}")
+st.metric("ปริมาณฟางโดยประมาณ (ตัน)", f"{tons.getInfo():,.0f}")
+st.metric("รถเกี่ยวที่ต้องใช้ (เที่ยว)", f"{trips.getInfo():,.0f}")
+
+# Map viewer
+m = geemap.Map()
+m.centerObject(aoi, 8)
+m.addLayer(gcvi_image, {"min": 0, "max": 2, "palette": ['yellow', 'green', 'darkgreen']}, "GCVI")
+m.addLayer(harvested, {"palette": ['red']}, "เกี่ยวแล้ว")
+m.to_streamlit(height=600)
